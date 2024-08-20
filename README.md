@@ -1,2 +1,5 @@
-# price-sync-acesse-oscar
-Serviços de sincronização de tabela de preços entre o ERP Acesse (Brasil Software) e a biblioteca de e-commerce Oscar Django
+# sync-acesse-oscar
+
+Microservices to sync product price data between Acesse ERP software (from Brasil Software) and a system based on the Django Oscar e-commerce library.
+
+Built with Go, PostgreSQL and SQLC.

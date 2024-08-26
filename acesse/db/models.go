@@ -10,19 +10,19 @@ import (
 
 type ItemPreco struct {
 	CodigoItem          float64
-	CodigoUnidade       int32
-	CodigoPrazo         int32
+	CodigoUnidade       int
+	CodigoPrazo         int
 	CodigoComissao      pgtype.Int4
-	Preco               pgtype.Numeric
-	PermiteDesconto     int32
-	DescontoMaximo      pgtype.Numeric
+	Preco               float64
+	PermiteDesconto     int
+	DescontoMaximo      float64
 	AlteracaoPreco      pgtype.Date
-	DescontoMaximoProg  pgtype.Numeric
-	DebitoEmpresaProg   pgtype.Numeric
-	CreditoVendedorProg pgtype.Numeric
-	DebitoVendedorProg  pgtype.Numeric
-	NumeroAlteracao     int32
-	FlagDelivery        int32
+	DescontoMaximoProg  float64
+	DebitoEmpresaProg   float64
+	CreditoVendedorProg float64
+	DebitoVendedorProg  float64
+	NumeroAlteracao     int
+	FlagDelivery        int
 }
 
 type VnLastNotificationEvent struct {

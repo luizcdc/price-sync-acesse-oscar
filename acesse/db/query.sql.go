@@ -11,19 +11,85 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const clearNotificationEvents = `-- name: ClearNotificationEvents :exec
+DELETE FROM vn_last_notification_event WHERE date_sent < now() - interval '1 hour' * $1
+`
+
+func (q *Queries) ClearNotificationEvents(ctx context.Context, dollar_1 interface{}) error {
+	_, err := q.db.Exec(ctx, clearNotificationEvents, dollar_1)
+	return err
+}
+
+const getAllProducts = `-- name: GetAllProducts :many
+SELECT codigo_item, preco, alteracao_preco FROM item_preco WHERE codigo_prazo == $1 ORDER BY alteracao_preco, codigo_item, preco DESC
+`
+
+type GetAllProductsRow struct {
+	CodigoItem     float64
+	Preco          float64
+	AlteracaoPreco pgtype.Date
+}
+
+func (q *Queries) GetAllProducts(ctx context.Context, codigoPrazo int) ([]GetAllProductsRow, error) {
+	rows, err := q.db.Query(ctx, getAllProducts, codigoPrazo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetAllProductsRow
+	for rows.Next() {
+		var i GetAllProductsRow
+		if err := rows.Scan(&i.CodigoItem, &i.Preco, &i.AlteracaoPreco); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getNotificationEvent = `-- name: GetNotificationEvent :one
+SELECT event_type, codigo_item, date_sent FROM vn_last_notification_event WHERE event_type == $1 and codigo_item == $2
+`
+
+type GetNotificationEventParams struct {
+	EventType  string
+	CodigoItem float64
+}
+
+func (q *Queries) GetNotificationEvent(ctx context.Context, arg GetNotificationEventParams) (VnLastNotificationEvent, error) {
+	row := q.db.QueryRow(ctx, getNotificationEvent, arg.EventType, arg.CodigoItem)
+	var i VnLastNotificationEvent
+	err := row.Scan(&i.EventType, &i.CodigoItem, &i.DateSent)
+	return i, err
+}
+
+const getPriceWatcher = `-- name: GetPriceWatcher :one
+SELECT last_update, prices_hash FROM vn_price_update_watcher ORDER BY last_update DESC LIMIT 1
+`
+
+func (q *Queries) GetPriceWatcher(ctx context.Context) (VnPriceUpdateWatcher, error) {
+	row := q.db.QueryRow(ctx, getPriceWatcher)
+	var i VnPriceUpdateWatcher
+	err := row.Scan(&i.LastUpdate, &i.PricesHash)
+	return i, err
+}
+
 const getProducts = `-- name: GetProducts :many
 SELECT codigo_item, codigo_unidade, preco, alteracao_preco FROM item_preco WHERE codigo_item = ANY($1::int[]) and codigo_prazo == $2
 `
 
 type GetProductsParams struct {
-	Column1     []int32
-	CodigoPrazo int32
+	Column1     []int
+	CodigoPrazo int
 }
 
 type GetProductsRow struct {
 	CodigoItem     float64
-	CodigoUnidade  int32
-	Preco          pgtype.Numeric
+	CodigoUnidade  int
+	Preco          float64
 	AlteracaoPreco pgtype.Date
 }
 
@@ -55,91 +121,25 @@ func (q *Queries) GetProducts(ctx context.Context, arg GetProductsParams) ([]Get
 	return items, nil
 }
 
-const clearNotificationEvents = `-- name: clearNotificationEvents :exec
-DELETE FROM vn_last_notification_event WHERE date_sent < now() - interval '1 hour' * $1
-`
-
-func (q *Queries) clearNotificationEvents(ctx context.Context, dollar_1 interface{}) error {
-	_, err := q.db.Exec(ctx, clearNotificationEvents, dollar_1)
-	return err
-}
-
-const getAllProducts = `-- name: getAllProducts :many
-SELECT codigo_item, preco, alteracao_preco FROM item_preco WHERE codigo_prazo == $1 ORDER BY alteracao_preco, codigo_item, preco DESC
-`
-
-type getAllProductsRow struct {
-	CodigoItem     float64
-	Preco          pgtype.Numeric
-	AlteracaoPreco pgtype.Date
-}
-
-func (q *Queries) getAllProducts(ctx context.Context, codigoPrazo int32) ([]getAllProductsRow, error) {
-	rows, err := q.db.Query(ctx, getAllProducts, codigoPrazo)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []getAllProductsRow
-	for rows.Next() {
-		var i getAllProductsRow
-		if err := rows.Scan(&i.CodigoItem, &i.Preco, &i.AlteracaoPreco); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getNotificationEvent = `-- name: getNotificationEvent :one
-SELECT event_type, codigo_item, date_sent FROM vn_last_notification_event WHERE event_type == $1 and codigo_item == $2
-`
-
-type getNotificationEventParams struct {
-	EventType  string
-	CodigoItem float64
-}
-
-func (q *Queries) getNotificationEvent(ctx context.Context, arg getNotificationEventParams) (VnLastNotificationEvent, error) {
-	row := q.db.QueryRow(ctx, getNotificationEvent, arg.EventType, arg.CodigoItem)
-	var i VnLastNotificationEvent
-	err := row.Scan(&i.EventType, &i.CodigoItem, &i.DateSent)
-	return i, err
-}
-
-const getPriceWatcher = `-- name: getPriceWatcher :one
-SELECT last_update, prices_hash FROM vn_price_update_watcher ORDER BY last_update DESC LIMIT 1
-`
-
-func (q *Queries) getPriceWatcher(ctx context.Context) (VnPriceUpdateWatcher, error) {
-	row := q.db.QueryRow(ctx, getPriceWatcher)
-	var i VnPriceUpdateWatcher
-	err := row.Scan(&i.LastUpdate, &i.PricesHash)
-	return i, err
-}
-
-const registerNotificationEvent = `-- name: registerNotificationEvent :exec
+const registerNotificationEvent = `-- name: RegisterNotificationEvent :exec
 INSERT INTO vn_last_notification_event (event_type, codigo_item, date_sent) VALUES ($1, $2, now())
 `
 
-type registerNotificationEventParams struct {
+type RegisterNotificationEventParams struct {
 	EventType  string
 	CodigoItem float64
 }
 
-func (q *Queries) registerNotificationEvent(ctx context.Context, arg registerNotificationEventParams) error {
+func (q *Queries) RegisterNotificationEvent(ctx context.Context, arg RegisterNotificationEventParams) error {
 	_, err := q.db.Exec(ctx, registerNotificationEvent, arg.EventType, arg.CodigoItem)
 	return err
 }
 
-const updatePriceWatcher = `-- name: updatePriceWatcher :exec
+const updatePriceWatcher = `-- name: UpdatePriceWatcher :exec
 INSERT INTO vn_price_update_watcher (last_update, prices_hash) VALUES (now(), $1)
 `
 
-func (q *Queries) updatePriceWatcher(ctx context.Context, pricesHash string) error {
+func (q *Queries) UpdatePriceWatcher(ctx context.Context, pricesHash string) error {
 	_, err := q.db.Exec(ctx, updatePriceWatcher, pricesHash)
 	return err
 }

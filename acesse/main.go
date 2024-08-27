@@ -17,7 +17,9 @@ var CODIGO_PRAZO int
 const APPLICATION_JSON = "application/json"
 
 var SERVER_PORT uint16
-// 
+
+// calculateCurrentHash calculates the hash of all products' prices
+// and returns it as a string. 
 func calculateCurrentHash(queryEngine *db.Queries) (string, error) {
 	products, err := queryEngine.GetAllProducts(context.Background(), CODIGO_PRAZO)
 	if err != nil {
@@ -31,8 +33,9 @@ func calculateCurrentHash(queryEngine *db.Queries) (string, error) {
 	return finalHash, nil
 }
 
+// isThereNewUpdate compares the last stored hash and the calculated current hash
+// of all products' prices, signaling whether there has been any update or not.
 func isThereNewUpdate(queryEngine *db.Queries) bool {
-	// query db to get last update time and hash
 	watcher, err := queryEngine.GetPriceWatcher(context.Background())
 	if err != nil {
 		panic("getPriceWatcher")
@@ -43,8 +46,7 @@ func isThereNewUpdate(queryEngine *db.Queries) bool {
 		panic("calcNewHash")
 	}
 
-	return watcher.PricesHash == "" || watcher.PricesHash != currentHash
-	// if there is a hash, calculate the current hash and compare with it
+	return watcher.PricesHash != currentHash
 }
 
 

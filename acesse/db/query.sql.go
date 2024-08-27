@@ -52,6 +52,18 @@ func (q *Queries) GetAllProducts(ctx context.Context, codigoPrazo int) ([]GetAll
 	return items, nil
 }
 
+const getMostRecentUpdate = `-- name: GetMostRecentUpdate :one
+SELECT alteracao_preco FROM item_preco ORDER BY alteracao_preco DESC LIMIT 1
+`
+
+// GetMostRecentUpdate retrieves the most recent update of the prices.
+func (q *Queries) GetMostRecentUpdate(ctx context.Context) (pgtype.Date, error) {
+	row := q.db.QueryRow(ctx, getMostRecentUpdate)
+	var alteracao_preco pgtype.Date
+	err := row.Scan(&alteracao_preco)
+	return alteracao_preco, err
+}
+
 const getNotificationEvent = `-- name: GetNotificationEvent :one
 SELECT event_type, codigo_item, date_sent FROM vn_last_notification_event WHERE event_type == $1 and codigo_item == $2
 `
@@ -81,12 +93,12 @@ func (q *Queries) GetPriceWatcher(ctx context.Context) (VnPriceUpdateWatcher, er
 }
 
 const getProducts = `-- name: GetProducts :many
-SELECT codigo_item, codigo_unidade, preco, alteracao_preco FROM item_preco WHERE codigo_item = ANY($2::int[]) and codigo_prazo == $1
+SELECT codigo_item, codigo_unidade, preco, alteracao_preco FROM item_preco WHERE codigo_item = ANY($2::pg_catalog.numeric[]) and codigo_prazo == $1
 `
 
 type GetProductsParams struct {
 	CodigoPrazo  int
-	CodigosItens []int
+	CodigosItens []float64
 }
 
 type GetProductsRow struct {

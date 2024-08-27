@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,22 +17,23 @@ var CODIGO_PRAZO int
 const APPLICATION_JSON = "application/json"
 
 var SERVER_PORT uint16
+// 
 func calculateCurrentHash(queryEngine *db.Queries) (string, error) {
 	products, err := queryEngine.GetAllProducts(context.Background(), CODIGO_PRAZO)
 	if err != nil {
 		return "", err
 	}
-	var allProductsString strings.Builder
+	var allProductsString bytes.Buffer
 	for _, product := range products {
-			allProductsString.WriteString(fmt.Sprintf("%v%v%v",product.CodigoItem, product.Preco, product.AlteracaoPreco.Time))
+			allProductsString.WriteString(fmt.Sprintf("%v%v",product.CodigoItem, product.Preco))
 	}
-	finalHash := fmt.Sprintf("%x", sha256.Sum256([]byte(allProductsString.String())))
+	finalHash := fmt.Sprintf("%x", sha256.Sum256(allProductsString.Bytes()))
 	return finalHash, nil
 }
 
 func isThereNewUpdate(queryEngine *db.Queries) bool {
 	// query db to get last update time and hash
-	watcher, err := queryEngine.getPriceWatcher(context.Background())
+	watcher, err := queryEngine.GetPriceWatcher(context.Background())
 	if err != nil {
 		panic("getPriceWatcher")
 	}

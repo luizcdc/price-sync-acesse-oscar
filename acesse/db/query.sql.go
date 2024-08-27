@@ -12,24 +12,26 @@ import (
 )
 
 const clearNotificationEvents = `-- name: ClearNotificationEvents :exec
-DELETE FROM vn_last_notification_event WHERE date_sent < now() - interval '1 hour' * $1
+DELETE FROM vn_last_notification_event WHERE date_sent < now() - interval '1 hour' * $1::integer
 `
 
-func (q *Queries) ClearNotificationEvents(ctx context.Context, dollar_1 interface{}) error {
-	_, err := q.db.Exec(ctx, clearNotificationEvents, dollar_1)
+// ClearNotificationEvents deletes old notification exem.
+func (q *Queries) ClearNotificationEvents(ctx context.Context, numberOfHours int) error {
+	_, err := q.db.Exec(ctx, clearNotificationEvents, numberOfHours)
 	return err
 }
 
 const getAllProducts = `-- name: GetAllProducts :many
-SELECT codigo_item, preco, alteracao_preco FROM item_preco WHERE codigo_prazo == $1 ORDER BY alteracao_preco, codigo_item, preco DESC
+SELECT codigo_item, preco FROM item_preco WHERE codigo_prazo == $1 ORDER BY codigo_item, codigo_unidade DESC
 `
 
 type GetAllProductsRow struct {
-	CodigoItem     float64
-	Preco          float64
-	AlteracaoPreco pgtype.Date
+	CodigoItem float64
+	Preco      float64
 }
 
+// GetAllProducts is used to calculate the hash of the products and prices. Always sorted in a predictable order.
+// This is used to check if the prices have changed.
 func (q *Queries) GetAllProducts(ctx context.Context, codigoPrazo int) ([]GetAllProductsRow, error) {
 	rows, err := q.db.Query(ctx, getAllProducts, codigoPrazo)
 	if err != nil {
@@ -39,7 +41,7 @@ func (q *Queries) GetAllProducts(ctx context.Context, codigoPrazo int) ([]GetAll
 	var items []GetAllProductsRow
 	for rows.Next() {
 		var i GetAllProductsRow
-		if err := rows.Scan(&i.CodigoItem, &i.Preco, &i.AlteracaoPreco); err != nil {
+		if err := rows.Scan(&i.CodigoItem, &i.Preco); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -70,6 +72,7 @@ const getPriceWatcher = `-- name: GetPriceWatcher :one
 SELECT last_update, prices_hash FROM vn_price_update_watcher ORDER BY last_update DESC LIMIT 1
 `
 
+// GetPriceWatcher retrieves the last hash and update time of the prices.
 func (q *Queries) GetPriceWatcher(ctx context.Context) (VnPriceUpdateWatcher, error) {
 	row := q.db.QueryRow(ctx, getPriceWatcher)
 	var i VnPriceUpdateWatcher
@@ -78,12 +81,12 @@ func (q *Queries) GetPriceWatcher(ctx context.Context) (VnPriceUpdateWatcher, er
 }
 
 const getProducts = `-- name: GetProducts :many
-SELECT codigo_item, codigo_unidade, preco, alteracao_preco FROM item_preco WHERE codigo_item = ANY($1::int[]) and codigo_prazo == $2
+SELECT codigo_item, codigo_unidade, preco, alteracao_preco FROM item_preco WHERE codigo_item = ANY($2::int[]) and codigo_prazo == $1
 `
 
 type GetProductsParams struct {
-	Column1     []int
-	CodigoPrazo int
+	CodigoPrazo  int
+	CodigosItens []int
 }
 
 type GetProductsRow struct {
@@ -97,7 +100,7 @@ type GetProductsRow struct {
 // Later we'll filter by the most recent alteracao_preco. If there are two with the same
 // alteracao_preco, we'll send a warning to the admin through email.
 func (q *Queries) GetProducts(ctx context.Context, arg GetProductsParams) ([]GetProductsRow, error) {
-	rows, err := q.db.Query(ctx, getProducts, arg.Column1, arg.CodigoPrazo)
+	rows, err := q.db.Query(ctx, getProducts, arg.CodigoPrazo, arg.CodigosItens)
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +142,7 @@ const updatePriceWatcher = `-- name: UpdatePriceWatcher :exec
 INSERT INTO vn_price_update_watcher (last_update, prices_hash) VALUES (now(), $1)
 `
 
+// UpdatePriceWatcher updates the last hash and update time of the prices.
 func (q *Queries) UpdatePriceWatcher(ctx context.Context, pricesHash string) error {
 	_, err := q.db.Exec(ctx, updatePriceWatcher, pricesHash)
 	return err

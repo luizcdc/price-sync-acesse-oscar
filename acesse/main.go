@@ -5,34 +5,76 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"log"
 	"net/http"
+	"net/smtp"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/joho/godotenv"
 	"github.com/luizcdc/sync-acesse-oscar/acesse/db"
 )
 
 var API_KEY string
-var VN_PARTNER_ID int64
+
+// TIMEZONE_OFFSET_HOURS should be in the format -03:00
+var TIMEZONE_OFFSET_HOURS string
 var CODIGO_PRAZO int
+var HOURS_BETWEEN_NOTIFICATIONS int
+var EMAIL_AUTH smtp.Auth
+
 const APPLICATION_JSON = "application/json"
 
 var SERVER_PORT uint16
 
+func loadEnv() {
+	if godotenv.Load() != nil {
+		log.Fatal("Error loading .env file")
+	}
+
+	API_KEY = os.Getenv("API_KEY")
+	if API_KEY == "" {
+		log.Fatal("API_KEY not found in environment")
+	}
+
+	TIMEZONE_OFFSET_HOURS = os.Getenv("TIMEZONE_OFFSET_HOURS")
+	if TIMEZONE_OFFSET_HOURS == "" {
+		log.Fatal("TIMEZONE_OFFSET_HOURS not found in environment")
+	}
+	var err error
+	CODIGO_PRAZO, err = strconv.Atoi(os.Getenv("DEFAULT_PRAZO"))
+	if err != nil {
+		log.Fatal("CODIGO_PRAZO not found in environment")
+	}
+
+	HOURS_BETWEEN_NOTIFICATIONS, err = strconv.Atoi(os.Getenv("HOURS_BETWEEN_NOTIFICATIONS"))
+	if err != nil {
+		log.Fatal("HOURS_BETWEEN_NOTIFICATIONS not found in environment")
+	}
+
+	EMAIL_AUTH = smtp.PlainAuth(
+		"",
+		os.Getenv("EMAIL_FROM"),
+		os.Getenv("EMAIL_PASSWORD"),
+		os.Getenv("EMAIL_HOSTNAME"),
+	)
+}
+
 // calculateCurrentHash calculates the hash of all products' prices
-// and returns it as a string. 
+// and returns it as a string.
 func calculateCurrentHash(queryEngine *db.Queries) (string, error) {
-	products, err := queryEngine.GetAllProducts(context.Background(), CODIGO_PRAZO)
+	products, err := queryEngine.GetAllProducts(context.TODO(), CODIGO_PRAZO)
 	if err != nil {
 		return "", err
 	}
 	var allProductsString bytes.Buffer
 	for _, product := range products {
-			allProductsString.WriteString(fmt.Sprintf("%v%v",product.CodigoItem, product.Preco))
+		allProductsString.WriteString(fmt.Sprintf("%v%v", product.CodigoItem, product.Preco))
 	}
 	finalHash := fmt.Sprintf("%x", sha256.Sum256(allProductsString.Bytes()))
 	return finalHash, nil
@@ -41,16 +83,16 @@ func calculateCurrentHash(queryEngine *db.Queries) (string, error) {
 // isThereNewUpdate compares the last stored hash and the calculated current hash
 // of all products' prices, signaling whether there has been any update or not.
 func isThereNewUpdate(queryEngine *db.Queries, closingChannel chan interface{}) bool {
-	watcher, err := queryEngine.GetPriceWatcher(context.Background())
+	watcher, err := queryEngine.GetPriceWatcher(context.TODO())
 	if err != nil {
 		defer closeChannel(closingChannel)
-		panic(err)
+		log.Fatal(err)
 	}
-	
+
 	currentHash, err := calculateCurrentHash(queryEngine)
 	if err != nil {
 		defer closeChannel(closingChannel)
-		panic(err)
+		log.Fatal(err)
 	}
 
 	return watcher.PricesHash != currentHash
@@ -67,50 +109,45 @@ func readBody(resp *http.Response) string {
 // If the update is acknowledged and accepted, it sends the product codes provided in the answer
 // to the updateQueue channel.
 func notifyUpdate(queryEngine *db.Queries, updateQueue chan float64, closing chan interface{}) {
-	// TODO implement notifyUpdate
 	client := http.Client{
 		Timeout: 15 * time.Second,
 	}
-	mostRecentUpdate, err := queryEngine.GetMostRecentUpdate(context.Background())
+	mostRecentUpdate, err := queryEngine.GetMostRecentUpdate(context.TODO())
 	if err != nil {
 		defer closeChannel(closing)
-		panic(err)
+		log.Fatal(err)
 	}
-	// TODO: env variable timezone, -03:00
-	
 	// We send the most recent update as 23:59:59 of the recorded day because the database
 	// only stores the date.
-	// TODO: integrate credentials
-	lastUpdateTimestamp := url.QueryEscape(fmt.Sprintf("%sT23:59:59%s", mostRecentUpdate.Time.Format("2006-01-02"), localTimezone))
+	lastUpdateTimestamp := url.QueryEscape(fmt.Sprintf("%sT23:59:59%s", mostRecentUpdate.Time.Format("2006-01-02"), TIMEZONE_OFFSET_HOURS))
 	resp, err := client.Get(fmt.Sprintf("http://localhost:8080/api/integration/price-update/catalogue-product?lastupdate=%s&key=%s", lastUpdateTimestamp, url.QueryEscape(API_KEY)))
 	if err != nil {
 		defer closeChannel(closing)
-		panic(err)
+		log.Fatal(err)
 	}
 	defer resp.Body.Close()
 
-	
 	text := strings.Trim(readBody(resp), "\"")
 
 	if text == "null" {
 		hash, err := calculateCurrentHash(queryEngine)
 		if err != nil {
 			defer closeChannel(closing)
-			panic(err)
+			log.Fatal(err)
 		}
-		queryEngine.UpdatePriceWatcher(context.Background(), hash)
+		queryEngine.UpdatePriceWatcher(context.TODO(), hash)
 		return
 	}
-	
+
 	for _, codigo := range strings.Split(text, ",") {
 		codigoFloat, err := strconv.ParseFloat(codigo, 64)
 		if err != nil {
 			defer closeChannel(closing)
-			panic(err)
+			log.Fatal(err)
 		}
 		updateQueue <- codigoFloat
 	}
-	updateQueue <- -1.0 // Signals that the current update has finished
+	updateQueue <- -1.0 // Signals that the current update has finished sending the list of codes
 }
 
 func closeChannel(toClose chan interface{}) {
@@ -122,7 +159,7 @@ func closeChannel(toClose chan interface{}) {
 	}
 }
 
-func sendUpdates(queryEngine *db.Queries, closing chan interface{}, updateQueue chan float64) {
+func sendUpdates(connpool *pgxpool.Pool, queryEngine *db.Queries, closing chan interface{}, updateQueue chan float64) {
 	codigos := make([]float64, 0, 500)
 	for {
 		select {
@@ -131,19 +168,88 @@ func sendUpdates(queryEngine *db.Queries, closing chan interface{}, updateQueue 
 		case codigo := <-updateQueue:
 			if codigo == -1.0 {
 				// SEND ALL UPDATES AS JSON TO OSCAR
-				codigos := make([]float64, 0, 500)
-				// Query the database with codigos
+				products, err := queryEngine.GetProductsPrices(context.TODO(), db.GetProductsPricesParams{CodigoPrazo: CODIGO_PRAZO, CodigosItens: codigos})
+				if err != nil {
+					log.Fatal(err)
+				}
+				codigosToSend := make([]float64, 0, 500)
 				
 				// Check for duplicate codigo_item
-				// If there are duplicates, choose the one with the most recent alteracao_preco
-				// If there are two with the same alteracao_preco, send a warning to the admin through email
+				// The query is ordered by codigo_item and alteracao_preco, so we can check for duplicates
+				// by only looking at the next item
+				var lastCodigo float64
+				var lastCodigoUnidade int
+				var lastDataAlteracao time.Time
+				for _, product := range products {
+					if product.CodigoItem == lastCodigo {
+						if product.AlteracaoPreco.Time.Format("2006-01-02") == lastDataAlteracao.Format("2006-01-02") {
+							_, err := queryEngine.GetNotificationEvent(context.TODO(), db.GetNotificationEventParams{
+								EventType:  "ALTERACOES_SIMULTANEAS",
+								CodigoItem: product.CodigoItem,
+							})
+							// TODO: I'm not sure this is the error that is returned
+							if err == pgx.ErrNoRows {
+								tx, err := connpool.Begin(context.TODO())
+								if err != nil {
+									log.Println(err)
+									continue
+								}
+								defer tx.Rollback(context.TODO())
+								err = queryEngine.WithTx(tx).RegisterNotificationEvent(
+									context.TODO(),
+									db.RegisterNotificationEventParams{
+										EventType:  "ALTERACOES_SIMULTANEAS",
+										CodigoItem: product.CodigoItem,
+									},
+								)
+								if err != nil {
+									log.Println(err)
+									tx.Rollback(context.TODO())
+									continue
+								}
+								err = smtp.SendMail(
+									os.Getenv("EMAIL_SMTP_SERVER_ADDR"),
+									EMAIL_AUTH, os.Getenv("EMAIL_FROM"),
+									[]string{os.Getenv("EMAIL_ADMIN_ADDRESS")},
+									[]byte(fmt.Sprintf(
+										("O produto com o código %d (ou %f) no Acesse tem"+
+											"duas alterações de preço recentes para as"+
+											"unidades com código %d e %d."),
+										int(product.CodigoItem),
+										product.CodigoItem,
+										product.CodigoUnidade,
+										lastCodigoUnidade)),
+								)
+								if err != nil {
+									log.Println(err)
+									tx.Rollback(context.TODO())
+									continue
+								}
 
-				// Send the updates to Oscar
-
-				// Update the last update time and hash
-				continue
+							}
+							// skipping
+							if len(codigosToSend) > 0 {
+								codigosToSend = codigosToSend[:len(codigosToSend)-1]
+							}
+						}
+					} else {
+						codigosToSend = append(codigosToSend, product.CodigoItem)
+						lastCodigo = product.CodigoItem
+						lastCodigoUnidade = product.CodigoUnidade
+						lastDataAlteracao = product.AlteracaoPreco.Time
+					}
+					// TODO: Send the updates to Oscar
+					hash, err := calculateCurrentHash(queryEngine)
+					if err != nil {
+						log.Println(err)
+						continue
+					}
+					queryEngine.UpdatePriceWatcher(context.TODO(), hash)
+				}
+				codigos = make([]float64, 0, 500)
+			} else {
+				codigos = append(codigos, codigo)
 			}
-			codigos = append(codigos, codigo)
 		}
 	}
 }
@@ -151,25 +257,27 @@ func sendUpdates(queryEngine *db.Queries, closing chan interface{}, updateQueue 
 func main() {
 	closing := make(chan interface{})
 	updateQueue := make(chan float64)
-	ctx := context.Background()
-	// TODO add connstring
-	connConfig, err := pgx.ParseConfig("")
+	ctx := context.TODO()
+	connConfig, err := pgx.ParseConfig(os.Getenv("POSTGRES_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
 	connpool, err := pgxpool.NewWithConfig(
 		ctx,
 		&pgxpool.Config{
-			ConnConfig: connConfig,
+			ConnConfig:      connConfig,
 			MaxConnIdleTime: 30 * time.Second,
 			MaxConns:        10,
 		},
 	)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 	defer connpool.Close()
-	
+
 	queryEngine := db.New(connpool)
 
-	go sendUpdates(queryEngine, closing, updateQueue)
+	go sendUpdates(connpool, queryEngine, closing, updateQueue)
 
 	for {
 		select {
@@ -179,13 +287,11 @@ func main() {
 		default:
 			fmt.Println("Checking for updates...")
 		}
-		if isThereNewUpdate(queryEngine, closing){
+		if isThereNewUpdate(queryEngine, closing) {
 			notifyUpdate(queryEngine, updateQueue, closing)
 		}
-		// TODO: parameterize number of hours
-		queryEngine.ClearNotificationEvents(ctx, 1)
+		queryEngine.ClearNotificationEvents(ctx, HOURS_BETWEEN_NOTIFICATIONS)
 		time.Sleep(15 * time.Minute)
 	}
 
-	
 }

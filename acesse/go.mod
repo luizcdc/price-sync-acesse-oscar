@@ -2,7 +2,10 @@ module github.com/luizcdc/sync-acesse-oscar/acesse
 
 go 1.22.3
 
-require github.com/jackc/pgx/v5 v5.6.0
+require (
+	github.com/jackc/pgx/v5 v5.6.0
+	github.com/joho/godotenv v1.5.1
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect

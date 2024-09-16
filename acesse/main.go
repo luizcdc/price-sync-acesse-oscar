@@ -27,6 +27,9 @@ var TIMEZONE_OFFSET string
 var DEFAULT_PRAZO int
 var HOURS_BETWEEN_NOTIFICATIONS int
 var EMAIL_AUTH smtp.Auth
+var EMAIL_SMTP_SERVER_ADDR string
+var EMAIL_FROM_FORMATTED string
+var EMAIL_ADMIN_ADDRESS string
 
 const APPLICATION_JSON = "application/json"
 
@@ -57,6 +60,13 @@ func loadEnv() {
 		log.Fatal("HOURS_BETWEEN_NOTIFICATIONS not found in environment")
 	}
 
+	EMAIL_FROM_FORMATTED = fmt.Sprintf("%s <%s>", os.Getenv("EMAIL_FROM_NAME"), os.Getenv("EMAIL_FROM"))
+	EMAIL_SMTP_SERVER_ADDR = fmt.Sprintf("%s:%s", os.Getenv("EMAIL_SMTP_SERVER"), os.Getenv("EMAIL_SMTP_PORT"))
+
+	EMAIL_ADMIN_ADDRESS = os.Getenv("EMAIL_ADMIN_ADDRESS")
+	if EMAIL_ADMIN_ADDRESS == "" {
+		log.Fatal("EMAIL_ADMIN_ADDRESS not found in environment")
+	}
 	EMAIL_AUTH = smtp.PlainAuth(
 		"",
 		os.Getenv("EMAIL_FROM"),
@@ -208,9 +218,9 @@ func sendUpdates(connpool *pgxpool.Pool, queryEngine *db.Queries, closing chan i
 									continue
 								}
 								err = smtp.SendMail(
-									os.Getenv("EMAIL_SMTP_SERVER_ADDR"),
-									EMAIL_AUTH, os.Getenv("EMAIL_FROM"),
-									[]string{os.Getenv("EMAIL_ADMIN_ADDRESS")},
+									EMAIL_SMTP_SERVER_ADDR,
+									EMAIL_AUTH, EMAIL_FROM_FORMATTED,
+									[]string{EMAIL_ADMIN_ADDRESS},
 									[]byte(fmt.Sprintf(
 										("O produto com o código %d (ou %f) no Acesse tem"+
 											"duas alterações de preço recentes para as"+

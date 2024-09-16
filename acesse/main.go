@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -35,6 +37,11 @@ var OSCAR_HOST string
 const APPLICATION_JSON = "application/json"
 
 var SERVER_PORT uint16
+
+type PriceToUpdate struct {
+	Codigo float64 `json:"codigo"`
+	Preco  float64 `json:"preco"`
+}
 
 func loadEnv() {
 	if godotenv.Load() != nil {
@@ -193,15 +200,11 @@ func UpdaterGoroutine(connpool *pgxpool.Pool, queryEngine *db.Queries, closing c
 }
 
 func prepareUpdate(queryEngine *db.Queries, codigos []float64, connpool *pgxpool.Pool) {
-	type PriceUpdate struct {
-		Codigo float64 `json:"codigo"`
-		Preco  float64 `json:"preco"`
-	}
 	products, err := queryEngine.GetProductsPrices(context.TODO(), db.GetProductsPricesParams{CodigoPrazo: DEFAULT_PRAZO, CodigosItens: codigos})
 	if err != nil {
 		log.Fatal(err)
 	}
-	pricesToSend := make([]PriceUpdate, 0, 500)
+	pricesToSend := make([]PriceToUpdate, 0, 500)
 
 	// Check for duplicate codigo_item
 	// The query is ordered by codigo_item and alteracao_preco, so we can check for duplicates
@@ -219,19 +222,46 @@ func prepareUpdate(queryEngine *db.Queries, codigos []float64, connpool *pgxpool
 				notifySimultaneousPriceChanges(queryEngine, product, connpool, lastCodigoUnidade)
 			}
 		} else {
-			pricesToSend = append(pricesToSend, PriceUpdate{Codigo: product.CodigoItem, Preco: product.Preco})
+			pricesToSend = append(pricesToSend, PriceToUpdate{Codigo: product.CodigoItem, Preco: product.Preco})
 			lastCodigo = product.CodigoItem
 			lastCodigoUnidade = product.CodigoUnidade
 			lastDataAlteracao = product.AlteracaoPreco.Time
 		}
 	}
-	// TODO: Send the updates to Oscar
+
+	err = sendUpdate(pricesToSend)
+	if err != nil {
+		log.Println(err)
+		return
+	}
 	hash, err := calculateCurrentHash(queryEngine)
 	if err != nil {
 		log.Println(err)
 		return
 	}
 	queryEngine.UpdatePriceWatcher(context.TODO(), hash)
+}
+
+func sendUpdate(prices []PriceToUpdate) error {
+	client := http.Client{
+		Timeout: 15 * time.Second,
+	}
+	jsonPrices, err := json.Marshal(prices)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+	resp, err := client.Post(fmt.Sprintf("%s/api/integration/price-update/catalogue-product", OSCAR_HOST), APPLICATION_JSON, bytes.NewBuffer(jsonPrices))
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Println("Failed to send update to Oscar")
+		return errors.New(fmt.Sprintf("Failed to send update to Oscar: HTTP %v", resp.StatusCode))
+	}
+	return nil
 }
 
 func notifySimultaneousPriceChanges(queryEngine *db.Queries, product db.GetProductsPricesRow, connpool *pgxpool.Pool, lastCodigoUnidade int) {

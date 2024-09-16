@@ -22,9 +22,9 @@ import (
 
 var API_KEY string
 
-// TIMEZONE_OFFSET_HOURS should be in the format -03:00
-var TIMEZONE_OFFSET_HOURS string
-var CODIGO_PRAZO int
+// TIMEZONE_OFFSET should be in the format -03:00
+var TIMEZONE_OFFSET string
+var DEFAULT_PRAZO int
 var HOURS_BETWEEN_NOTIFICATIONS int
 var EMAIL_AUTH smtp.Auth
 
@@ -42,14 +42,14 @@ func loadEnv() {
 		log.Fatal("API_KEY not found in environment")
 	}
 
-	TIMEZONE_OFFSET_HOURS = os.Getenv("TIMEZONE_OFFSET_HOURS")
-	if TIMEZONE_OFFSET_HOURS == "" {
-		log.Fatal("TIMEZONE_OFFSET_HOURS not found in environment")
+	TIMEZONE_OFFSET = os.Getenv("TIMEZONE_OFFSET")
+	if TIMEZONE_OFFSET == "" {
+		log.Fatal("TIMEZONE_OFFSET not found in environment")
 	}
 	var err error
-	CODIGO_PRAZO, err = strconv.Atoi(os.Getenv("DEFAULT_PRAZO"))
+	DEFAULT_PRAZO, err = strconv.Atoi(os.Getenv("DEFAULT_PRAZO"))
 	if err != nil {
-		log.Fatal("CODIGO_PRAZO not found in environment")
+		log.Fatal("DEFAULT_PRAZO not found in environment")
 	}
 
 	HOURS_BETWEEN_NOTIFICATIONS, err = strconv.Atoi(os.Getenv("HOURS_BETWEEN_NOTIFICATIONS"))
@@ -68,7 +68,7 @@ func loadEnv() {
 // calculateCurrentHash calculates the hash of all products' prices
 // and returns it as a string.
 func calculateCurrentHash(queryEngine *db.Queries) (string, error) {
-	products, err := queryEngine.GetAllProducts(context.TODO(), CODIGO_PRAZO)
+	products, err := queryEngine.GetAllProducts(context.TODO(), DEFAULT_PRAZO)
 	if err != nil {
 		return "", err
 	}
@@ -119,7 +119,7 @@ func notifyUpdate(queryEngine *db.Queries, updateQueue chan float64, closing cha
 	}
 	// We send the most recent update as 23:59:59 of the recorded day because the database
 	// only stores the date.
-	lastUpdateTimestamp := url.QueryEscape(fmt.Sprintf("%sT23:59:59%s", mostRecentUpdate.Time.Format("2006-01-02"), TIMEZONE_OFFSET_HOURS))
+	lastUpdateTimestamp := url.QueryEscape(fmt.Sprintf("%sT23:59:59%s", mostRecentUpdate.Time.Format("2006-01-02"), TIMEZONE_OFFSET))
 	resp, err := client.Get(fmt.Sprintf("http://localhost:8080/api/integration/price-update/catalogue-product?lastupdate=%s&key=%s", lastUpdateTimestamp, url.QueryEscape(API_KEY)))
 	if err != nil {
 		defer closeChannel(closing)
@@ -168,12 +168,12 @@ func sendUpdates(connpool *pgxpool.Pool, queryEngine *db.Queries, closing chan i
 		case codigo := <-updateQueue:
 			if codigo == -1.0 {
 				// SEND ALL UPDATES AS JSON TO OSCAR
-				products, err := queryEngine.GetProductsPrices(context.TODO(), db.GetProductsPricesParams{CodigoPrazo: CODIGO_PRAZO, CodigosItens: codigos})
+				products, err := queryEngine.GetProductsPrices(context.TODO(), db.GetProductsPricesParams{CodigoPrazo: DEFAULT_PRAZO, CodigosItens: codigos})
 				if err != nil {
 					log.Fatal(err)
 				}
 				codigosToSend := make([]float64, 0, 500)
-				
+
 				// Check for duplicate codigo_item
 				// The query is ordered by codigo_item and alteracao_preco, so we can check for duplicates
 				// by only looking at the next item

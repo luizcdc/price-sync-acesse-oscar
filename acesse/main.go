@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -142,7 +141,14 @@ func notifyOfUpdate(queryEngine *db.Queries, updateQueue chan float64, closing c
 	// We send the most recent update as 23:59:59 of the recorded day because the acesse database
 	// only stores the date.
 	lastUpdateTimestamp := url.QueryEscape(fmt.Sprintf("%sT23:59:59%s", mostRecentUpdate.Time.Format("2006-01-02"), TIMEZONE_OFFSET))
-	resp, err := client.Get(fmt.Sprintf("%s/api/integration/price-update/catalogue-product?lastupdate=%s&key=%s", OSCAR_HOST, lastUpdateTimestamp, url.QueryEscape(API_KEY)))
+
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/integration/price-update/catalogue-product?lastupdate=%s", OSCAR_HOST, lastUpdateTimestamp), nil)
+	if err != nil {
+		defer closeChannel(closing)
+		log.Fatal(err)
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", API_KEY))
+	resp, err := client.Do(req)
 	if err != nil {
 		defer closeChannel(closing)
 		log.Fatal(err)
@@ -251,15 +257,22 @@ func sendUpdate(prices []PriceToUpdate) error {
 		log.Println(err)
 		return err
 	}
-	resp, err := client.Post(fmt.Sprintf("%s/api/integration/price-update/catalogue-product", OSCAR_HOST), APPLICATION_JSON, bytes.NewBuffer(jsonPrices))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/integration/price-update/catalogue-product", OSCAR_HOST), bytes.NewBuffer(jsonPrices))
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", API_KEY))
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Println(err)
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		log.Println("Failed to send update to Oscar")
-		return errors.New(fmt.Sprintf("Failed to send update to Oscar: HTTP %v", resp.StatusCode))
+		err = fmt.Errorf("failed to send update to Oscar: HTTP %v", resp.StatusCode)
+		log.Println(err)
+		return err
 	}
 	return nil
 }

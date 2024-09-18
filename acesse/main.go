@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/luizcdc/sync-acesse-oscar/acesse/db"
@@ -30,6 +29,7 @@ var HOURS_BETWEEN_NOTIFICATIONS int
 var EMAIL_AUTH smtp.Auth
 var EMAIL_SMTP_SERVER_ADDR string
 var EMAIL_FROM_FORMATTED string
+var EMAIL_FROM string
 var EMAIL_ADMIN_ADDRESS string
 var OSCAR_HOST string
 
@@ -68,7 +68,8 @@ func loadEnv() {
 	}
 
 	EMAIL_FROM_FORMATTED = fmt.Sprintf("%s <%s>", os.Getenv("EMAIL_FROM_NAME"), os.Getenv("EMAIL_FROM"))
-	EMAIL_SMTP_SERVER_ADDR = fmt.Sprintf("%s:%s", os.Getenv("EMAIL_SMTP_SERVER"), os.Getenv("EMAIL_SMTP_PORT"))
+	EMAIL_FROM = os.Getenv("EMAIL_FROM")
+	EMAIL_SMTP_SERVER_ADDR = fmt.Sprintf("%s:%s", os.Getenv("EMAIL_HOSTNAME"), os.Getenv("EMAIL_PORT"))
 
 	EMAIL_ADMIN_ADDRESS = os.Getenv("EMAIL_ADMIN_ADDRESS")
 	if EMAIL_ADMIN_ADDRESS == "" {
@@ -115,7 +116,7 @@ func isThereNewUpdate(queryEngine *db.Queries, closingChannel chan interface{}) 
 		defer closeChannel(closingChannel)
 		log.Fatal(err)
 	}
-
+	log.Printf("Current hash[:16]: '%s', Last hash[:16]: '%s'\n", currentHash[:min(16, len(currentHash))], watcher.PricesHash[:min(16, len(watcher.PricesHash))])
 	return watcher.PricesHash != currentHash
 }
 
@@ -129,7 +130,7 @@ func readBody(resp *http.Response) string {
 // If the update is acknowledged but refused, the last update time and hash are updated.
 // If the update is acknowledged and accepted, it sends the product codes provided in the answer
 // to the updateQueue channel.
-func notifyOfUpdate(queryEngine *db.Queries, updateQueue chan float64, closing chan interface{}) {
+func notifyOfUpdate(queryEngine *db.Queries, connpool *pgxpool.Pool, updateQueue chan float64, closing chan interface{}) {
 	client := http.Client{
 		Timeout: 15 * time.Second,
 	}
@@ -140,7 +141,8 @@ func notifyOfUpdate(queryEngine *db.Queries, updateQueue chan float64, closing c
 	}
 	// We send the most recent update as 23:59:59 of the recorded day because the acesse database
 	// only stores the date.
-	lastUpdateTimestamp := url.QueryEscape(fmt.Sprintf("%sT23:59:59%s", mostRecentUpdate.Time.Format("2006-01-02"), TIMEZONE_OFFSET))
+	// TODO: uncertain whether'%sT23:59:59%s' or '%s 23:59:59%s' is the correct format
+	lastUpdateTimestamp := url.QueryEscape(fmt.Sprintf("%s 23:59:59%s", mostRecentUpdate.Time.Format("2006-01-02"), TIMEZONE_OFFSET))
 
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/integration/price-update/catalogue-product?lastupdate=%s", OSCAR_HOST, lastUpdateTimestamp), nil)
 	if err != nil {
@@ -150,12 +152,21 @@ func notifyOfUpdate(queryEngine *db.Queries, updateQueue chan float64, closing c
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", API_KEY))
 	resp, err := client.Do(req)
 	if err != nil {
+		// if the error is due to no connection, return. Else, close the channel and log the error
+		if strings.Contains(err.Error(), "dial tcp") {
+			go notifyOfNoConnection(queryEngine, connpool)
+			return
+		}
 		defer closeChannel(closing)
 		log.Fatal(err)
 	}
 	defer resp.Body.Close()
-
-	text := strings.Trim(readBody(resp), "\"")
+	log.Println("Notification of pending update response status:", resp.Status)
+	if resp.StatusCode != http.StatusOK {
+		go notifyErrorResponse(queryEngine, connpool, resp)
+		return
+	}
+	text := strings.Trim(readBody(resp), "\"'")
 
 	if text == "null" {
 		hash, err := calculateCurrentHash(queryEngine)
@@ -192,6 +203,7 @@ func UpdaterGoroutine(connpool *pgxpool.Pool, queryEngine *db.Queries, closing c
 	for {
 		select {
 		case <-closing:
+			log.Println("Closing UpdaterGoroutine after closing channel was closed...")
 			return
 		case codigo := <-updateQueue:
 			if codigo != -1.0 {
@@ -225,7 +237,7 @@ func prepareUpdate(queryEngine *db.Queries, codigos []float64, connpool *pgxpool
 				if len(pricesToSend) > 0 {
 					pricesToSend = pricesToSend[:len(pricesToSend)-1]
 				}
-				notifySimultaneousPriceChanges(queryEngine, product, connpool, lastCodigoUnidade)
+				go notifySimultaneousPriceChanges(queryEngine, product, connpool, lastCodigoUnidade)
 			}
 		} else {
 			pricesToSend = append(pricesToSend, PriceToUpdate{Codigo: product.CodigoItem, Preco: product.Preco})
@@ -235,7 +247,7 @@ func prepareUpdate(queryEngine *db.Queries, codigos []float64, connpool *pgxpool
 		}
 	}
 
-	err = sendUpdate(pricesToSend)
+	err = sendUpdate(queryEngine, connpool, pricesToSend)
 	if err != nil {
 		log.Println(err)
 		return
@@ -248,7 +260,7 @@ func prepareUpdate(queryEngine *db.Queries, codigos []float64, connpool *pgxpool
 	queryEngine.UpdatePriceWatcher(context.TODO(), hash)
 }
 
-func sendUpdate(prices []PriceToUpdate) error {
+func sendUpdate(queryEngine *db.Queries, connpool *pgxpool.Pool, prices []PriceToUpdate) error {
 	client := http.Client{
 		Timeout: 15 * time.Second,
 	}
@@ -265,80 +277,113 @@ func sendUpdate(prices []PriceToUpdate) error {
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", API_KEY))
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Println(err)
+		if strings.Contains(err.Error(), "dial tcp") {
+			go notifyOfNoConnection(queryEngine, connpool)
+			return err
+		}
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		err = fmt.Errorf("failed to send update to Oscar: HTTP %v", resp.StatusCode)
-		log.Println(err)
+		err = fmt.Errorf("failure Oscar reported an error while receiving the update: %v", resp.Status)
+		go notifyErrorResponse(queryEngine, connpool, resp)
 		return err
 	}
 	return nil
 }
 
-func notifySimultaneousPriceChanges(queryEngine *db.Queries, product db.GetProductsPricesRow, connpool *pgxpool.Pool, lastCodigoUnidade int) {
+func notifyAdmin(queryEngine *db.Queries, connpool *pgxpool.Pool, eventType string, codigoItem float64, message string) {
 	_, err := queryEngine.GetNotificationEvent(context.TODO(), db.GetNotificationEventParams{
-		EventType:  "ALTERACOES_SIMULTANEAS",
-		CodigoItem: product.CodigoItem,
+		EventType:  eventType,
+		CodigoItem: codigoItem,
 	})
-	// TODO: I'm not sure this is the error that is returned
-	if err == pgx.ErrNoRows {
-		tx, err := connpool.Begin(context.TODO())
-		if err != nil {
-			log.Println(err)
-			return
-		}
-		defer tx.Rollback(context.TODO())
-		err = queryEngine.WithTx(tx).RegisterNotificationEvent(
-			context.TODO(),
-			db.RegisterNotificationEventParams{
-				EventType:  "ALTERACOES_SIMULTANEAS",
-				CodigoItem: product.CodigoItem,
-			},
-		)
-		if err != nil {
-			log.Println(err)
-			tx.Rollback(context.TODO())
-			return
-		}
-		err = smtp.SendMail(
-			EMAIL_SMTP_SERVER_ADDR,
-			EMAIL_AUTH, EMAIL_FROM_FORMATTED,
-			[]string{EMAIL_ADMIN_ADDRESS},
-			[]byte(fmt.Sprintf(
-				("O produto com o código %d (ou %f) no Acesse tem"+
-					"duas alterações de preço recentes para as "+
-					"unidades com código %d e %d."),
-				int(product.CodigoItem),
-				product.CodigoItem,
-				product.CodigoUnidade,
-				lastCodigoUnidade)),
-		)
-		if err != nil {
-			log.Println(err)
-			tx.Rollback(context.TODO())
-			return
-		}
-
+	if err == nil || !strings.Contains(err.Error(), "no rows") {
+		log.Printf("Notification already sent within the last %v hours.", HOURS_BETWEEN_NOTIFICATIONS)
+		return
 	}
+	tx, err := connpool.Begin(context.TODO())
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer tx.Rollback(context.TODO())
+	err = queryEngine.WithTx(tx).RegisterNotificationEvent(
+		context.TODO(),
+		db.RegisterNotificationEventParams{
+			EventType:  eventType,
+			CodigoItem: codigoItem,
+		},
+	)
+	if err != nil {
+		log.Println(err)
+		tx.Rollback(context.TODO())
+		return
+	}
+	log.Println("Sending email notification...")
+	log.Println(EMAIL_SMTP_SERVER_ADDR) // TODO: remove
+	err = smtp.SendMail(
+		EMAIL_SMTP_SERVER_ADDR,
+		EMAIL_AUTH, EMAIL_FROM,
+		[]string{EMAIL_ADMIN_ADDRESS},
+		[]byte(
+			fmt.Sprintf(
+				"From: %s\r\n" +
+				"To: Admin <%s>\r\n" +
+				"Subject: Integração Oscar Acesse - %s\r\n\r\n%s",
+				EMAIL_FROM_FORMATTED,
+				EMAIL_ADMIN_ADDRESS,
+				eventType,
+				message,
+			)),
+				//    Date: Fri, 21 Nov 1997 09:55:06 -0600
+				//    Message-ID: <1234@local.machine.example>
+	)
+	if err != nil {
+		log.Printf("Error sending %s email notification: %s", eventType, err.Error())
+		tx.Rollback(context.TODO())
+		return
+	}
+	tx.Commit(context.TODO())
+	log.Printf("Email notification sent for event %s", eventType)
+}
+
+func notifyErrorResponse(queryEngine *db.Queries, connpool *pgxpool.Pool, resp *http.Response) {
+	message := fmt.Sprintf("O servidor do Oscar respondeu com um erro: %s.\nBody: %s", resp.Status, readBody(resp))
+	notifyAdmin(queryEngine, connpool, "OSCAR_NOT_OK_RESPONSE", -1.0, message)
+}
+
+func notifyOfNoConnection(queryEngine *db.Queries, connpool *pgxpool.Pool) {
+	message := "Não foi possível se conectar ao servidor do Oscar para enviar as atualizações de preço."
+	notifyAdmin(queryEngine, connpool, "NO_CONNECTION", -1.0, message)
+}
+
+func notifySimultaneousPriceChanges(queryEngine *db.Queries, product db.GetProductsPricesRow, connpool *pgxpool.Pool, lastCodigoUnidade int) {
+	message := fmt.Sprintf(
+		("O produto com o código %d (ou %f) no Acesse tem " +
+			"duas alterações de preço recentes para as " +
+			"unidades com código %d e %d."),
+		int(product.CodigoItem),
+		product.CodigoItem,
+		product.CodigoUnidade,
+		lastCodigoUnidade,
+	)
+	notifyAdmin(queryEngine, connpool, "ALTERACOES_SIMULTANEAS", product.CodigoItem, message)
 }
 
 func main() {
+	loadEnv()
 	closing := make(chan interface{})
 	updateQueue := make(chan float64)
 	ctx := context.TODO()
-	connConfig, err := pgx.ParseConfig(os.Getenv("POSTGRES_URL"))
+	connConfig, err := pgxpool.ParseConfig(os.Getenv("POSTGRES_URL"))
 	if err != nil {
 		log.Fatal(err)
 	}
+	connConfig.MaxConnIdleTime = 30 * time.Second
+	connConfig.MaxConns = 10
 	connpool, err := pgxpool.NewWithConfig(
 		ctx,
-		&pgxpool.Config{
-			ConnConfig:      connConfig,
-			MaxConnIdleTime: 30 * time.Second,
-			MaxConns:        10,
-		},
+		connConfig,
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -352,13 +397,14 @@ func main() {
 	for {
 		select {
 		case <-closing:
-			fmt.Println("Closing gracefully...")
+			log.Println("Closing gracefully...")
 			return
 		default:
-			fmt.Println("Checking for updates...")
+			log.Println("Checking for updates...")
 		}
 		if isThereNewUpdate(queryEngine, closing) {
-			notifyOfUpdate(queryEngine, updateQueue, closing)
+			log.Println("There is a new update!")
+			go notifyOfUpdate(queryEngine, connpool, updateQueue, closing)
 		}
 		queryEngine.ClearNotificationEvents(ctx, HOURS_BETWEEN_NOTIFICATIONS)
 		time.Sleep(15 * time.Minute)

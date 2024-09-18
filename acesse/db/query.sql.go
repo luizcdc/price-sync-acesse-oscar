@@ -22,7 +22,7 @@ func (q *Queries) ClearNotificationEvents(ctx context.Context, numberOfHours int
 }
 
 const getAllProducts = `-- name: GetAllProducts :many
-SELECT codigo_item, preco FROM item_preco WHERE codigo_prazo == $1 ORDER BY codigo_item, codigo_unidade DESC
+SELECT codigo_item, preco FROM item_preco WHERE codigo_prazo = $1 ORDER BY codigo_item, codigo_unidade DESC
 `
 
 type GetAllProductsRow struct {
@@ -65,7 +65,7 @@ func (q *Queries) GetMostRecentUpdate(ctx context.Context) (pgtype.Date, error) 
 }
 
 const getNotificationEvent = `-- name: GetNotificationEvent :one
-SELECT event_type, codigo_item, date_sent FROM vn_last_notification_event WHERE event_type == $1 and codigo_item == $2
+SELECT event_type, codigo_item, date_sent FROM vn_last_notification_event WHERE event_type = $1 and codigo_item = $2
 `
 
 type GetNotificationEventParams struct {
@@ -93,7 +93,7 @@ func (q *Queries) GetPriceWatcher(ctx context.Context) (VnPriceUpdateWatcher, er
 }
 
 const getProductsPrices = `-- name: GetProductsPrices :many
-SELECT codigo_item, codigo_unidade, preco, alteracao_preco FROM item_preco WHERE codigo_item = ANY($2::pg_catalog.numeric[]) and codigo_prazo == $1 ORDER BY codigo_item, alteracao_preco DESC
+SELECT codigo_item, codigo_unidade, preco, alteracao_preco FROM item_preco WHERE codigo_item = ANY($2::pg_catalog.numeric[]) and codigo_prazo = $1 ORDER BY codigo_item, alteracao_preco DESC
 `
 
 type GetProductsPricesParams struct {

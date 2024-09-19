@@ -2,87 +2,78 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"net/http"
+	"log"
+	"os"
+	"strconv"
+	"time"
 
-	"github.com/jackc/pgx/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/julienschmidt/httprouter"
+	"github.com/joho/godotenv"
 	"github.com/luizcdc/sync-acesse-oscar/oscar/db"
 )
 
 var API_KEY string
 var VN_PARTNER_ID int64
+
+// TIMEZONE_OFFSET should be in the format -03
+var TIMEZONE_OFFSET string
+var DEFAULT_PRAZO int
+var OSCAR_HOST string
+var queryEngine *db.Queries
+var connpool *pgxpool.Pool
+
 const APPLICATION_JSON = "application/json"
 
 var SERVER_PORT uint16
 
-// ###################################### AUTH MIDDLEWARE #######################################
-type Auth struct {
-	handler httprouter.Router
-}
-
-// ServeHTTP is implements the http.Handler interface for the Auth struct, checking the
-// Authorization header for the API_KEY before serving the request.
-func (a *Auth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if API_KEY != "" && r.Header.Get("Authorization") != fmt.Sprintf("Bearer %s", API_KEY) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
+// loadEnv loads the environment variables from the .env file
+func loadEnv() {
+	if godotenv.Load() != nil {
+		log.Fatalln("Error loading .env file")
 	}
-	a.handler.ServeHTTP(w, r)
-}
 
-// createAuthSubRouter initializes an auth-only subrouter, setting up routes and handlers.
-func CreateAuthSubRouter() *Auth {
-	requireAuthRouter := httprouter.New()
-	// requireAuthRouter.POST(API_ROOT+"set/:path", SetSpecificRedirect)
-	// requireAuthRouter.POST(API_ROOT+"set", SetRandomRedirect)
-	// requireAuthRouter.DELETE(API_ROOT+"del/:path", DelRedirect)
-	// requireAuthRouter.GET(API_ROOT+"stats/urlcount", GetTotalSetRedirects)
-	// requireAuthRouter.GET(API_ROOT+"stats/redirectcount", GetTotalServedRedirects)
-	AuthSubRouter := &Auth{*requireAuthRouter}
-	return AuthSubRouter
-}
-// ################################### END AUTH MIDDLEWARE #####################################
+	API_KEY = os.Getenv("API_KEY")
+	if API_KEY == "" {
+		log.Fatalln("API_KEY not found in environment")
+	}
 
-// ###################################   DEFINING ROUTES  #####################################
-func DefineRoutes(AuthSubRouter *Auth) *httprouter.Router {
-	router := httprouter.New()
-
-	// router.Handler(http.MethodGet, "/:redirectpath/*any", AuthSubRouter)
-	// router.Handler(http.MethodPost, API_ROOT+"*any", AuthSubRouter)
-	// router.Handler(http.MethodDelete, API_ROOT+"*any", AuthSubRouter)
-	// router.Handler(http.MethodPut, API_ROOT+"*any", AuthSubRouter)
-
-	// router.GET("/:redirectpath", Redirect)
-	return router
-}
-// ################################# END DEFINING ROUTES ######################################
-
-func replyWithProductsList(queryEngine *db.Queries, lastUpdate pgtype.Timestamptz){
-	ctx := context.Background()
-	partnerSkus, err := queryEngine.GetAllProductsThatNeedUpdate(
-		ctx,
-		db.GetAllProductsThatNeedUpdateParams{
-			PartnerID: VN_PARTNER_ID,
-			DateUpdated: lastUpdate,
-		},
-	)
+	TIMEZONE_OFFSET = os.Getenv("TIMEZONE_OFFSET")
+	if TIMEZONE_OFFSET == "" {
+		log.Fatalln("TIMEZONE_OFFSET not found in environment")
+	}
+	p_id, err := strconv.Atoi(os.Getenv("VN_PARTNER_ID"))
 	if err != nil {
-		panic("HA")
+		log.Fatalf("Error parsing VN_PARTNER_ID: %v", err)
 	}
+	VN_PARTNER_ID = int64(p_id)
 }
 
 func main() {
-	ctx := context.Background()
-	d, err := pgxpool.New(ctx, fmt.Sprintf("user=%v dbname=%v sslmode=disable host=localhost port=%v"))
-	if err != nil {
-		return
-	}
-	queryEngine := db.New(d)
-	
-	for i := range 5 {
-		fmt.Println(i)
+	loadEnv()
 
+	setUpDB()
+
+	StartRouter()
+
+}
+
+// setUpDB initializes the database connection pool and the query engine singletons
+func setUpDB() {
+	ctx := context.TODO()
+	connConfig, err := pgxpool.ParseConfig(os.Getenv("POSTGRES_URL"))
+	if err != nil {
+		log.Fatalln(err)
 	}
+	connConfig.MaxConnIdleTime = 30 * time.Second
+	connConfig.MaxConns = 10
+	connpool, err = pgxpool.NewWithConfig(
+		ctx,
+		connConfig,
+	)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer connpool.Close()
+
+	queryEngine = db.New(connpool)
 }

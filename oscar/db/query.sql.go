@@ -39,19 +39,3 @@ func (q *Queries) GetAllProductsThatNeedUpdate(ctx context.Context, arg GetAllPr
 	}
 	return items, nil
 }
-
-const updateProductPrice = `-- name: UpdateProductPrice :exec
-UPDATE partner_stockrecord SET price = $1, date_updated = now() WHERE partner_id = $2 AND partner_sku = $3
-`
-
-type UpdateProductPriceParams struct {
-	Price      pgtype.Numeric
-	PartnerID  int64
-	PartnerSku string
-}
-
-// Update products from the values in the item_preco table
-func (q *Queries) UpdateProductPrice(ctx context.Context, arg UpdateProductPriceParams) error {
-	_, err := q.db.Exec(ctx, updateProductPrice, arg.Price, arg.PartnerID, arg.PartnerSku)
-	return err
-}

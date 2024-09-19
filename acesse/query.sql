@@ -30,3 +30,11 @@ SELECT codigo_item, preco FROM item_preco WHERE codigo_prazo = $1 ORDER BY codig
 -- name: GetMostRecentUpdate :one
 -- GetMostRecentUpdate retrieves the most recent update of the prices.
 SELECT alteracao_preco FROM item_preco ORDER BY alteracao_preco DESC LIMIT 1;
+
+-- name: RemoveOldPriceWatchers :exec
+-- RemoveOldPriceWatchers deletes all but the most recent price watcher.
+DELETE FROM vn_price_update_watcher
+WHERE last_update <> (
+    SELECT MAX(last_update)
+    FROM vn_price_update_watcher
+);

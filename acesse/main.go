@@ -32,6 +32,7 @@ var EMAIL_FROM_FORMATTED string
 var EMAIL_FROM string
 var EMAIL_ADMIN_ADDRESS string
 var OSCAR_HOST string
+var API_PREFIX string
 
 const APPLICATION_JSON = "application/json"
 
@@ -42,6 +43,7 @@ type PriceToUpdate struct {
 	Preco  float64 `json:"preco"`
 }
 
+// loadEnv loads the environment variables from the .env file.
 func loadEnv() {
 	if godotenv.Load() != nil {
 		log.Fatal("Error loading .env file")
@@ -85,6 +87,55 @@ func loadEnv() {
 	if OSCAR_HOST == "" {
 		log.Fatal("OSCAR_HOST not found in environment")
 	}
+
+	API_PREFIX = os.Getenv("API_PREFIX")
+	if API_PREFIX == "" {
+		log.Fatal("API_PREFIX not found in environment")
+	}
+}
+
+func main() {
+	loadEnv()
+	closing := make(chan interface{})
+	updateQueue := make(chan float64)
+	ctx := context.TODO()
+	connConfig, err := pgxpool.ParseConfig(os.Getenv("POSTGRES_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	connConfig.MaxConnIdleTime = 30 * time.Second
+	connConfig.MaxConns = 3
+	connpool, err := pgxpool.NewWithConfig(
+		ctx,
+		connConfig,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer connpool.Close()
+
+	queryEngine := db.New(connpool)
+
+	go UpdaterGoroutine(connpool, queryEngine, closing, updateQueue)
+	minutesToSleep := 15
+	for {
+		select {
+		case <-closing:
+			log.Println("Closing gracefully...")
+			return
+		default:
+			log.Println("Checking for updates.")
+		}
+		if isThereNewUpdate(queryEngine, closing) {
+			log.Println("There is a new update!")
+			go notifyOfUpdate(queryEngine, connpool, updateQueue, closing)
+		}
+		log.Println("Clearing old notifications and price watchers...")
+		queryEngine.ClearNotificationEvents(ctx, HOURS_BETWEEN_NOTIFICATIONS)
+		go queryEngine.RemoveOldPriceWatchers(ctx)
+		log.Printf("Sleeping for %v minutes...", minutesToSleep)
+		time.Sleep(time.Duration(minutesToSleep) * time.Minute)
+	}
 }
 
 // calculateCurrentHash calculates the hash of all products' prices
@@ -120,6 +171,7 @@ func isThereNewUpdate(queryEngine *db.Queries, closingChannel chan interface{}) 
 	return watcher.PricesHash != currentHash
 }
 
+// readBody reads the body of an http.Response and returns it as a string.
 func readBody(resp *http.Response) string {
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(resp.Body)
@@ -141,10 +193,9 @@ func notifyOfUpdate(queryEngine *db.Queries, connpool *pgxpool.Pool, updateQueue
 	}
 	// We send the most recent update as 23:59:59 of the recorded day because the acesse database
 	// only stores the date.
-	// TODO: uncertain whether'%sT23:59:59%s' or '%s 23:59:59%s' is the correct format
 	lastUpdateTimestamp := url.QueryEscape(fmt.Sprintf("%s 23:59:59%s", mostRecentUpdate.Time.Format("2006-01-02"), TIMEZONE_OFFSET))
 
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/integration/price-update/catalogue-product?lastupdate=%s", OSCAR_HOST, lastUpdateTimestamp), nil)
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s%sprice-update/catalogue-product?lastupdate=%s", OSCAR_HOST, API_PREFIX, lastUpdateTimestamp), nil)
 	if err != nil {
 		defer closeChannel(closing)
 		log.Fatal(err)
@@ -154,7 +205,7 @@ func notifyOfUpdate(queryEngine *db.Queries, connpool *pgxpool.Pool, updateQueue
 	if err != nil {
 		// if the error is due to no connection, return. Else, close the channel and log the error
 		if strings.Contains(err.Error(), "dial tcp") {
-			go notifyOfNoConnection(queryEngine, connpool)
+			go NotifyOfNoConnection(queryEngine, connpool)
 			return
 		}
 		defer closeChannel(closing)
@@ -163,7 +214,7 @@ func notifyOfUpdate(queryEngine *db.Queries, connpool *pgxpool.Pool, updateQueue
 	defer resp.Body.Close()
 	log.Println("Notification of pending update response status:", resp.Status)
 	if resp.StatusCode != http.StatusOK {
-		go notifyErrorResponse(queryEngine, connpool, resp)
+		go NotifyErrorResponse(queryEngine, connpool, resp)
 		return
 	}
 	text := strings.Trim(readBody(resp), "\"'")
@@ -189,6 +240,7 @@ func notifyOfUpdate(queryEngine *db.Queries, connpool *pgxpool.Pool, updateQueue
 	updateQueue <- -1.0 // Signals that the current update has finished sending the list of codes
 }
 
+// closeChannel closes a channel if it is not already closed.
 func closeChannel(toClose chan interface{}) {
 	select {
 	case <-toClose:
@@ -198,6 +250,8 @@ func closeChannel(toClose chan interface{}) {
 	}
 }
 
+// UpdaterGoroutine receives the product codes to update from the updateQueue channel,
+// collects their respective prices and sends the updates to Oscar.
 func UpdaterGoroutine(connpool *pgxpool.Pool, queryEngine *db.Queries, closing chan interface{}, updateQueue chan float64) {
 	codigos := make([]float64, 0, 500)
 	for {
@@ -217,6 +271,8 @@ func UpdaterGoroutine(connpool *pgxpool.Pool, queryEngine *db.Queries, closing c
 	}
 }
 
+// prepareUpdate uses the slice of codes to get the prices from the database and prepare to
+// send them to Oscar.
 func prepareUpdate(queryEngine *db.Queries, codigos []float64, connpool *pgxpool.Pool) {
 	products, err := queryEngine.GetProductsPrices(context.TODO(), db.GetProductsPricesParams{CodigoPrazo: DEFAULT_PRAZO, CodigosItens: codigos})
 	if err != nil {
@@ -237,7 +293,7 @@ func prepareUpdate(queryEngine *db.Queries, codigos []float64, connpool *pgxpool
 				if len(pricesToSend) > 0 {
 					pricesToSend = pricesToSend[:len(pricesToSend)-1]
 				}
-				go notifySimultaneousPriceChanges(queryEngine, product, connpool, lastCodigoUnidade)
+				go NotifySimultaneousPriceChanges(queryEngine, product, connpool, lastCodigoUnidade)
 			}
 		} else {
 			pricesToSend = append(pricesToSend, PriceToUpdate{Codigo: product.CodigoItem, Preco: product.Preco})
@@ -260,6 +316,7 @@ func prepareUpdate(queryEngine *db.Queries, codigos []float64, connpool *pgxpool
 	queryEngine.UpdatePriceWatcher(context.TODO(), hash)
 }
 
+// sendUpdate sends the prices to Oscar and returns an error if the request fails.
 func sendUpdate(queryEngine *db.Queries, connpool *pgxpool.Pool, prices []PriceToUpdate) error {
 	client := http.Client{
 		Timeout: 15 * time.Second,
@@ -269,7 +326,7 @@ func sendUpdate(queryEngine *db.Queries, connpool *pgxpool.Pool, prices []PriceT
 		log.Println(err)
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/integration/price-update/catalogue-product", OSCAR_HOST), bytes.NewBuffer(jsonPrices))
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s%sprice-update/catalogue-product", OSCAR_HOST, API_PREFIX), bytes.NewBuffer(jsonPrices))
 	if err != nil {
 		log.Println(err)
 		return err
@@ -278,7 +335,7 @@ func sendUpdate(queryEngine *db.Queries, connpool *pgxpool.Pool, prices []PriceT
 	resp, err := client.Do(req)
 	if err != nil {
 		if strings.Contains(err.Error(), "dial tcp") {
-			go notifyOfNoConnection(queryEngine, connpool)
+			go NotifyOfNoConnection(queryEngine, connpool)
 			return err
 		}
 		return err
@@ -286,128 +343,9 @@ func sendUpdate(queryEngine *db.Queries, connpool *pgxpool.Pool, prices []PriceT
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("failure Oscar reported an error while receiving the update: %v", resp.Status)
-		go notifyErrorResponse(queryEngine, connpool, resp)
+		go NotifyErrorResponse(queryEngine, connpool, resp)
 		return err
 	}
+	log.Printf("Update sent successfully. Response status: %s\n", resp.Status)
 	return nil
-}
-
-func notifyAdmin(queryEngine *db.Queries, connpool *pgxpool.Pool, eventType string, codigoItem float64, message string) {
-	_, err := queryEngine.GetNotificationEvent(context.TODO(), db.GetNotificationEventParams{
-		EventType:  eventType,
-		CodigoItem: codigoItem,
-	})
-	if err == nil || !strings.Contains(err.Error(), "no rows") {
-		log.Printf("Notification already sent within the last %v hours.", HOURS_BETWEEN_NOTIFICATIONS)
-		return
-	}
-	tx, err := connpool.Begin(context.TODO())
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	defer tx.Rollback(context.TODO())
-	err = queryEngine.WithTx(tx).RegisterNotificationEvent(
-		context.TODO(),
-		db.RegisterNotificationEventParams{
-			EventType:  eventType,
-			CodigoItem: codigoItem,
-		},
-	)
-	if err != nil {
-		log.Println(err)
-		tx.Rollback(context.TODO())
-		return
-	}
-	log.Println("Sending email notification...")
-	log.Println(EMAIL_SMTP_SERVER_ADDR) // TODO: remove
-	err = smtp.SendMail(
-		EMAIL_SMTP_SERVER_ADDR,
-		EMAIL_AUTH, EMAIL_FROM,
-		[]string{EMAIL_ADMIN_ADDRESS},
-		[]byte(
-			fmt.Sprintf(
-				"From: %s\r\n" +
-				"To: Admin <%s>\r\n" +
-				"Subject: Integração Oscar Acesse - %s\r\n\r\n%s",
-				EMAIL_FROM_FORMATTED,
-				EMAIL_ADMIN_ADDRESS,
-				eventType,
-				message,
-			)),
-				//    Date: Fri, 21 Nov 1997 09:55:06 -0600
-				//    Message-ID: <1234@local.machine.example>
-	)
-	if err != nil {
-		log.Printf("Error sending %s email notification: %s", eventType, err.Error())
-		tx.Rollback(context.TODO())
-		return
-	}
-	tx.Commit(context.TODO())
-	log.Printf("Email notification sent for event %s", eventType)
-}
-
-func notifyErrorResponse(queryEngine *db.Queries, connpool *pgxpool.Pool, resp *http.Response) {
-	message := fmt.Sprintf("O servidor do Oscar respondeu com um erro: %s.\nBody: %s", resp.Status, readBody(resp))
-	notifyAdmin(queryEngine, connpool, "OSCAR_NOT_OK_RESPONSE", -1.0, message)
-}
-
-func notifyOfNoConnection(queryEngine *db.Queries, connpool *pgxpool.Pool) {
-	message := "Não foi possível se conectar ao servidor do Oscar para enviar as atualizações de preço."
-	notifyAdmin(queryEngine, connpool, "NO_CONNECTION", -1.0, message)
-}
-
-func notifySimultaneousPriceChanges(queryEngine *db.Queries, product db.GetProductsPricesRow, connpool *pgxpool.Pool, lastCodigoUnidade int) {
-	message := fmt.Sprintf(
-		("O produto com o código %d (ou %f) no Acesse tem " +
-			"duas alterações de preço recentes para as " +
-			"unidades com código %d e %d."),
-		int(product.CodigoItem),
-		product.CodigoItem,
-		product.CodigoUnidade,
-		lastCodigoUnidade,
-	)
-	notifyAdmin(queryEngine, connpool, "ALTERACOES_SIMULTANEAS", product.CodigoItem, message)
-}
-
-func main() {
-	loadEnv()
-	closing := make(chan interface{})
-	updateQueue := make(chan float64)
-	ctx := context.TODO()
-	connConfig, err := pgxpool.ParseConfig(os.Getenv("POSTGRES_URL"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	connConfig.MaxConnIdleTime = 30 * time.Second
-	connConfig.MaxConns = 10
-	connpool, err := pgxpool.NewWithConfig(
-		ctx,
-		connConfig,
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer connpool.Close()
-
-	queryEngine := db.New(connpool)
-
-	go UpdaterGoroutine(connpool, queryEngine, closing, updateQueue)
-
-	for {
-		select {
-		case <-closing:
-			log.Println("Closing gracefully...")
-			return
-		default:
-			log.Println("Checking for updates...")
-		}
-		if isThereNewUpdate(queryEngine, closing) {
-			log.Println("There is a new update!")
-			go notifyOfUpdate(queryEngine, connpool, updateQueue, closing)
-		}
-		queryEngine.ClearNotificationEvents(ctx, HOURS_BETWEEN_NOTIFICATIONS)
-		time.Sleep(15 * time.Minute)
-	}
-
 }

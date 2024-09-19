@@ -150,6 +150,20 @@ func (q *Queries) RegisterNotificationEvent(ctx context.Context, arg RegisterNot
 	return err
 }
 
+const removeOldPriceWatchers = `-- name: RemoveOldPriceWatchers :exec
+DELETE FROM vn_price_update_watcher
+WHERE last_update <> (
+    SELECT MAX(last_update)
+    FROM vn_price_update_watcher
+)
+`
+
+// RemoveOldPriceWatchers deletes all but the most recent price watcher.
+func (q *Queries) RemoveOldPriceWatchers(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, removeOldPriceWatchers)
+	return err
+}
+
 const updatePriceWatcher = `-- name: UpdatePriceWatcher :exec
 INSERT INTO vn_price_update_watcher (last_update, prices_hash) VALUES (now(), $1)
 `

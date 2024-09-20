@@ -51,7 +51,7 @@ func StartRouter() {
 
 	log.Printf("Starting server on port %d\n", SERVER_PORT)
 
-	log.Fatal(http.ListenAndServe(fmt.Sprintf("localhost:%v", SERVER_PORT), router))
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%v", SERVER_PORT), router))
 }
 
 func readBody(body io.ReadCloser) []byte {

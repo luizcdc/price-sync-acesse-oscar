@@ -22,10 +22,11 @@ type Auth struct {
 // ServeHTTP is implements the http.Handler interface for the Auth struct, checking the
 // Authorization header for the API_KEY before serving the request.
 func (a *Auth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// log everything about the request
-	log.Printf("Request: %s %s\n", r.Method, r.URL.Path)
-	log.Printf("Headers: %v\n", r.Header)
-	log.Printf("Body length: %d\n", r.ContentLength)
+	log.Println("Received request")
+	// // log everything about the request
+	// log.Printf("Request: %s %s\n", r.Method, r.URL.Path)
+	// log.Printf("Headers: %v\n", r.Header)
+	// log.Printf("Body length: %d\n", r.ContentLength)
 	if API_KEY != "" && r.Header.Get("Authorization") != fmt.Sprintf("Bearer %s", API_KEY) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return

@@ -16,17 +16,13 @@ import (
 )
 
 type Auth struct {
-	handler httprouter.Router
+	handler *httprouter.Router
 }
 
 // ServeHTTP is implements the http.Handler interface for the Auth struct, checking the
 // Authorization header for the API_KEY before serving the request.
 func (a *Auth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	log.Println("Received request")
-	// // log everything about the request
-	// log.Printf("Request: %s %s\n", r.Method, r.URL.Path)
-	// log.Printf("Headers: %v\n", r.Header)
-	// log.Printf("Body length: %d\n", r.ContentLength)
+	log.Printf("REQUEST — %s %s — Remote address: %s — host %s — headers %v\n", r.Method, r.URL.Path, r.RemoteAddr, r.Host, r.Header)
 	if API_KEY != "" && r.Header.Get("Authorization") != fmt.Sprintf("Bearer %s", API_KEY) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -37,7 +33,10 @@ func (a *Auth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // createAuthSubRouter initializes an auth-only subrouter, setting up routes and handlers.
 func CreateBearerAuthRouter() *Auth {
 	underlyingRouter := httprouter.New()
-	AuthRouter := &Auth{*underlyingRouter}
+
+	// Roteia normalmente
+
+	AuthRouter := &Auth{underlyingRouter}
 
 	underlyingRouter.GET("/price-update/catalogue-product", replyWithProductsList)
 	underlyingRouter.POST("/price-update/catalogue-product", receivePriceUpdates)
@@ -114,9 +113,10 @@ func receivePriceUpdates(w http.ResponseWriter, r *http.Request, params httprout
 	}
 	defer r.Body.Close()
 	fmt.Println("Received Price Update")
-	log.Printf("Received body: %s\n", readBody(r.Body))
-	if err := json.Unmarshal(readBody(r.Body), &products); err != nil {
-		log.Printf("Error reading request body: %v\n", err)
+	bodyContents := readBody(r.Body)
+	log.Printf("Received body: `%s`\n", bodyContents)
+	if err := json.Unmarshal(bodyContents, &products); err != nil {
+		log.Printf("Error reading request body: '%v'\n", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Error reading request body."))
 		return
@@ -137,8 +137,7 @@ func receivePriceUpdates(w http.ResponseWriter, r *http.Request, params httprout
 	res.Exec(
 		func(i int, err error) {
 			if err != nil {
-				log.Printf("Error updating product price on batch %d: %v\n", i, err)
-				w.WriteHeader(http.StatusInternalServerError)
+				log.Printf("Error updating product price on batch item %d: %v\n", i, err)
 				errors = true
 			}
 		})

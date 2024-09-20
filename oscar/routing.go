@@ -22,6 +22,10 @@ type Auth struct {
 // ServeHTTP is implements the http.Handler interface for the Auth struct, checking the
 // Authorization header for the API_KEY before serving the request.
 func (a *Auth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// log everything about the request
+	log.Printf("Request: %s %s\n", r.Method, r.URL.Path)
+	log.Printf("Headers: %v\n", r.Header)
+	log.Printf("Body length: %d\n", r.ContentLength)
 	if API_KEY != "" && r.Header.Get("Authorization") != fmt.Sprintf("Bearer %s", API_KEY) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -36,7 +40,7 @@ func CreateBearerAuthRouter() *Auth {
 
 	underlyingRouter.GET("/price-update/catalogue-product", replyWithProductsList)
 	underlyingRouter.POST("/price-update/catalogue-product", receivePriceUpdates)
-	
+
 	return AuthRouter
 }
 
@@ -50,13 +54,11 @@ func StartRouter() {
 	log.Fatal(http.ListenAndServe(fmt.Sprintf("localhost:%v", SERVER_PORT), router))
 }
 
-
 func readBody(body io.ReadCloser) []byte {
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(body)
 	return buf.Bytes()
 }
-
 
 func replyWithProductsList(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
 	log.Printf("Received notice of available update and request for products-to-update list\n")
@@ -73,7 +75,7 @@ func replyWithProductsList(w http.ResponseWriter, r *http.Request, params httpro
 	partnerSkus, err := queryEngine.GetAllProductsThatNeedUpdate(
 		ctx,
 		db.GetAllProductsThatNeedUpdateParams{
-			PartnerID: VN_PARTNER_ID,
+			PartnerID:   VN_PARTNER_ID,
 			DateUpdated: lastUpdatePgType,
 		},
 	)
@@ -89,7 +91,7 @@ func replyWithProductsList(w http.ResponseWriter, r *http.Request, params httpro
 		w.Write([]byte("null"))
 		return
 	}
-	
+
 	var buffer bytes.Buffer
 	buffer.WriteString("\"")
 	for i, sku := range partnerSkus {
@@ -104,9 +106,11 @@ func replyWithProductsList(w http.ResponseWriter, r *http.Request, params httpro
 
 }
 
-
 func receivePriceUpdates(w http.ResponseWriter, r *http.Request, params httprouter.Params) {
-	var products []struct{Codigo float64 `json:"codigo"`; Preco  float64 `json:"preco"`}
+	var products []struct {
+		Codigo float64 `json:"codigo"`
+		Preco  float64 `json:"preco"`
+	}
 	defer r.Body.Close()
 	fmt.Println("Received Price Update")
 	log.Printf("Received body: %s\n", readBody(r.Body))
@@ -119,8 +123,8 @@ func receivePriceUpdates(w http.ResponseWriter, r *http.Request, params httprout
 	productsToUpdate := make([]db.UpdateProductPriceParams, len(products))
 	for _, product := range products {
 		productsToUpdate = append(productsToUpdate, db.UpdateProductPriceParams{
-			Price: product.Preco,
-			PartnerID: VN_PARTNER_ID,
+			Price:      product.Preco,
+			PartnerID:  VN_PARTNER_ID,
 			PartnerSku: fmt.Sprintf("%.0f", product.Codigo),
 		})
 	}
@@ -136,7 +140,7 @@ func receivePriceUpdates(w http.ResponseWriter, r *http.Request, params httprout
 				w.WriteHeader(http.StatusInternalServerError)
 				errors = true
 			}
-	})
+		})
 	if !errors {
 		log.Printf("Updated %d products\n", len(products))
 		w.WriteHeader(http.StatusOK)

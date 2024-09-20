@@ -52,9 +52,9 @@ func main() {
 	loadEnv()
 
 	setUpDB()
+	defer connpool.Close()
 
 	StartRouter()
-
 }
 
 // setUpDB initializes the database connection pool and the query engine singletons
@@ -73,7 +73,6 @@ func setUpDB() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	defer connpool.Close()
 
 	queryEngine = db.New(connpool)
 }

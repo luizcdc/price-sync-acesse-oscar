@@ -83,6 +83,7 @@ func replyWithProductsList(w http.ResponseWriter, r *http.Request, params httpro
 		log.Printf("Error getting products that need update: %v\n", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(fmt.Sprintf("Error getting products that need update: %v\n", err)))
+		return
 	}
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", APPLICATION_JSON)
